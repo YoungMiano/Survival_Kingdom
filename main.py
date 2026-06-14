@@ -1,0 +1,320 @@
+"""
+Kingdom Survival - A single-player terminal survival and wealth-building game.
+Survive 100 days and build your fortune from humble beginnings.
+"""
+
+import json
+import os
+import random
+import sys
+import time
+from datetime import datetime
+
+# ─── ANSI Color Support ────────────────────────────────────────────────────────
+
+def supports_color():
+    """Check if terminal supports ANSI color codes."""
+    return hasattr(sys.stdout, 'isatty') and sys.stdout.isatty()
+
+USE_COLOR = supports_color()
+
+class C:
+    """ANSI color codes."""
+    RESET   = "\033[0m"    if USE_COLOR else ""
+    BOLD    = "\033[1m"    if USE_COLOR else ""
+    DIM     = "\033[2m"    if USE_COLOR else ""
+    RED     = "\033[91m"   if USE_COLOR else ""
+    GREEN   = "\033[92m"   if USE_COLOR else ""
+    YELLOW  = "\033[93m"   if USE_COLOR else ""
+    BLUE    = "\033[94m"   if USE_COLOR else ""
+    MAGENTA = "\033[95m"   if USE_COLOR else ""
+    CYAN    = "\033[96m"   if USE_COLOR else ""
+    WHITE   = "\033[97m"   if USE_COLOR else ""
+    GOLD    = "\033[33m"   if USE_COLOR else ""
+    ORANGE  = "\033[38;5;208m" if USE_COLOR else ""
+
+def col(text, color):
+    return f"{color}{text}{C.RESET}"
+
+# ─── UI Helpers ────────────────────────────────────────────────────────────────
+
+WIDTH = 70
+
+def clear():
+    os.system('cls' if os.name == 'nt' else 'clear')
+
+def hr(char='═', color=C.CYAN):
+    print(col(char * WIDTH, color))
+
+def header(title, color=C.CYAN):
+    hr('═', color)
+    pad = (WIDTH - len(title) - 2) // 2
+    print(col('║' + ' ' * pad + title + ' ' * (WIDTH - pad - len(title) - 2) + '║', color))
+    hr('═', color)
+
+def subheader(title, color=C.BLUE):
+    hr('─', color)
+    print(col(f"  {title}", C.BOLD + color))
+    hr('─', color)
+
+def box(lines, color=C.WHITE):
+    hr('─', color)
+    for line in lines:
+        print(f"  {line}")
+    hr('─', color)
+
+def pause(msg="Press Enter to continue..."):
+    input(col(f"\n  {msg}", C.DIM))
+
+def confirm(prompt):
+    while True:
+        ans = input(col(f"  {prompt} (y/n): ", C.YELLOW)).strip().lower()
+        if ans in ('y', 'yes'):
+            return True
+        if ans in ('n', 'no'):
+            return False
+        print(col("  Please enter y or n.", C.RED))
+
+def get_int(prompt, min_val=None, max_val=None):
+    while True:
+        try:
+            val = int(input(col(f"  {prompt}: ", C.YELLOW)).strip())
+            if min_val is not None and val < min_val:
+                print(col(f"  Must be at least {min_val}.", C.RED))
+                continue
+            if max_val is not None and val > max_val:
+                print(col(f"  Must be at most {max_val}.", C.RED))
+                continue
+            return val
+        except (ValueError, EOFError):
+            print(col("  Please enter a valid number.", C.RED))
+
+def get_choice(prompt, options):
+    """Get a valid menu choice from the player."""
+    while True:
+        try:
+            val = input(col(f"  {prompt}: ", C.YELLOW)).strip()
+            if val in options:
+                return val
+            print(col(f"  Invalid choice. Options: {', '.join(options)}", C.RED))
+        except EOFError:
+            return options[0]
+
+def notify(msg, color=C.GREEN):
+    print(col(f"\n  ✦ {msg}", color))
+
+def achievement_popup(name, desc):
+    print()
+    hr('★', C.GOLD)
+    print(col(f"  🏆 ACHIEVEMENT UNLOCKED: {name}", C.GOLD + C.BOLD))
+    print(col(f"     {desc}", C.YELLOW))
+    hr('★', C.GOLD)
+
+def stat_bar(label, value, maximum, width=20, color=C.GREEN):
+    filled = int((value / maximum) * width) if maximum > 0 else 0
+    bar = '█' * filled + '░' * (width - filled)
+    pct = int((value / maximum) * 100) if maximum > 0 else 0
+    bar_color = C.RED if pct < 25 else C.YELLOW if pct < 60 else color
+    return f"{label:<12} {col(bar, bar_color)} {col(str(value), C.WHITE)}/{maximum}"
+
+# ─── Constants ─────────────────────────────────────────────────────────────────
+
+SAVE_FILE = "savegame.json"
+MAX_DAYS = 100
+MAX_HEALTH = 100
+MAX_ENERGY = 100
+FOOD_PER_DAY = 1  # food consumed daily
+
+MARKET_ITEMS = {
+    "food":          {"base_price": 30,  "effect": {"food": 3}},
+    "medicine":      {"base_price": 80,  "effect": {"health": 20}},
+    "tool_kit":      {"base_price": 200, "effect": {"hunting_skill": 1}},
+    "lucky_charm":   {"base_price": 150, "effect": {"luck": 1}},
+    "energy_drink":  {"base_price": 50,  "effect": {"energy": 30}},
+}
+
+PROPERTIES = {
+    "small_house":  {"cost": 2000,   "income": 20,  "desc": "Small House",   "bonus": "health+5/day"},
+    "farm":         {"cost": 5000,   "income": 80,  "desc": "Farm",          "bonus": "food+2/day"},
+    "apartment":    {"cost": 10000,  "income": 150, "desc": "Apartment",     "bonus": None},
+    "shop":         {"cost": 20000,  "income": 300, "desc": "Shop",          "bonus": "reputation+1/day"},
+    "mansion":      {"cost": 100000, "income": 800, "desc": "Mansion",       "bonus": "luck+1/day"},
+}
+
+BUSINESSES = {
+    "food_stall":         {"cost": 1500,  "income": 40,  "desc": "Food Stall"},
+    "market_shop":        {"cost": 4000,  "income": 100, "desc": "Market Shop"},
+    "transport_business": {"cost": 8000,  "income": 180, "desc": "Transport Business"},
+    "farm_business":      {"cost": 15000, "income": 300, "desc": "Farm Business"},
+    "factory":            {"cost": 40000, "income": 700, "desc": "Factory"},
+}
+
+ACHIEVEMENTS = [
+    {"id": "first_1k",       "name": "First Steps",       "desc": "Earn 1,000 money",           "check": lambda p: p.money >= 1000},
+    {"id": "first_10k",      "name": "Getting There",     "desc": "Earn 10,000 money",          "check": lambda p: p.money >= 10000},
+    {"id": "first_100k",     "name": "Wealthy Citizen",   "desc": "Earn 100,000 money",         "check": lambda p: p.money >= 100000},
+    {"id": "first_500k",     "name": "Half a Million",    "desc": "Earn 500,000 money",         "check": lambda p: p.money >= 500000},
+    {"id": "millionaire",    "name": "Millionaire",       "desc": "Earn 1,000,000 money",       "check": lambda p: p.money >= 1000000},
+    {"id": "first_property", "name": "Homeowner",         "desc": "Purchase your first property","check": lambda p: len(p.properties) >= 1},
+    {"id": "landlord",       "name": "Landlord",          "desc": "Own 3 properties",            "check": lambda p: len(p.properties) >= 3},
+    {"id": "first_business", "name": "Entrepreneur",      "desc": "Start your first business",  "check": lambda p: len(p.businesses) >= 1},
+    {"id": "mogul",          "name": "Business Mogul",    "desc": "Own 3 businesses",            "check": lambda p: len(p.businesses) >= 3},
+    {"id": "survive_25",     "name": "Quarter Century",   "desc": "Survive 25 days",             "check": lambda p: p.day >= 25},
+    {"id": "survive_50",     "name": "Halfway There",     "desc": "Survive 50 days",             "check": lambda p: p.day >= 50},
+    {"id": "survive_75",     "name": "Veteran",           "desc": "Survive 75 days",             "check": lambda p: p.day >= 75},
+    {"id": "survive_100",    "name": "Kingdom Survivor",  "desc": "Survive all 100 days",        "check": lambda p: p.day >= 100},
+    {"id": "master_hunter",  "name": "Master Hunter",     "desc": "Reach Hunting Skill 10",      "check": lambda p: p.hunting_skill >= 10},
+    {"id": "master_trader",  "name": "Master Trader",     "desc": "Reach Trading Skill 10",      "check": lambda p: p.trading_skill >= 10},
+    {"id": "lucky_star",     "name": "Lucky Star",        "desc": "Reach Luck 10",               "check": lambda p: p.luck >= 10},
+    {"id": "well_known",     "name": "Well Known",        "desc": "Reach Reputation 10",         "check": lambda p: p.reputation >= 10},
+    {"id": "full_belly",     "name": "Full Belly",        "desc": "Hold 20+ food at once",       "check": lambda p: p.food >= 20},
+    {"id": "iron_will",      "name": "Iron Will",         "desc": "Survive with 5 or less health","check": lambda p: p.health <= 5 and p.alive},
+    {"id": "hoarder",        "name": "Hoarder",           "desc": "Own 5+ inventory items",      "check": lambda p: sum(p.inventory.values()) >= 5},
+    {"id": "explorer",       "name": "Explorer",          "desc": "Explore 20 times",            "check": lambda p: p.stats.get("explores", 0) >= 20},
+    {"id": "hard_worker",    "name": "Hard Worker",       "desc": "Work 20 times",               "check": lambda p: p.stats.get("work_count", 0) >= 20},
+    {"id": "investor",       "name": "Investor",          "desc": "Invest 10 times",             "check": lambda p: p.stats.get("invest_count", 0) >= 10},
+    {"id": "hunter",         "name": "Seasoned Hunter",   "desc": "Hunt 15 times",               "check": lambda p: p.stats.get("hunt_count", 0) >= 15},
+    {"id": "relic_finder",   "name": "Relic Hunter",      "desc": "Find an Ancient Relic",       "check": lambda p: p.inventory.get("ancient_relic", 0) >= 1},
+]
+
+# ─── Exploration Events (40+) ──────────────────────────────────────────────────
+
+EXPLORE_EVENTS = [
+    # Common (weight 30)
+    {"w": 30, "msg": "You find some coins on the road.",                       "money": (10, 50)},
+    {"w": 30, "msg": "You gather wild berries.",                               "food": (1, 2)},
+    {"w": 30, "msg": "You find an abandoned campfire with leftover food.",     "food": (1, 3)},
+    {"w": 30, "msg": "You discover a coin purse someone dropped.",             "money": (20, 80)},
+    {"w": 30, "msg": "You forage edible roots and mushrooms.",                 "food": (1, 3)},
+    {"w": 30, "msg": "You find a small cache of supplies.",                    "food": (1, 2), "money": (10, 30)},
+    {"w": 25, "msg": "You stumble upon a lost traveller's satchel with coin.", "money": (30, 100)},
+    {"w": 25, "msg": "You find freshwater and feel refreshed.",                "health": (5, 10)},
+    {"w": 25, "msg": "You spot healing herbs and tend your wounds.",           "health": (5, 15)},
+    {"w": 25, "msg": "You discover a shortcut, saving energy.",                "energy": (10, 20)},
+    # Uncommon (weight 15)
+    {"w": 15, "msg": "You find a hidden stash of gold coins!",                 "money": (100, 300)},
+    {"w": 15, "msg": "You discover an abandoned merchant's wagon with goods.", "food": (3, 6), "money": (50, 150)},
+    {"w": 15, "msg": "You meet a friendly hermit who shares his meal.",        "food": (2, 4), "health": (5, 10)},
+    {"w": 15, "msg": "You find an old medicine chest.",                        "health": (10, 25), "inv_item": "medicine"},
+    {"w": 15, "msg": "You discover a lucky charm in the dirt.",                "luck": (1, 1), "inv_item": "lucky_charm"},
+    {"w": 15, "msg": "You find an old tool kit.",                              "inv_item": "tool_kit"},
+    {"w": 15, "msg": "You meet a travelling merchant selling cheap wares.",    "money": (0, 0), "special": "cheap_merchant"},
+    {"w": 15, "msg": "You discover a secret garden with rare herbs.",          "health": (15, 30)},
+    {"w": 15, "msg": "You find an old chest buried under leaves.",             "money": (80, 250)},
+    {"w": 15, "msg": "You encounter a wise elder who teaches you a trick.",    "hunting_skill": (0, 1), "trading_skill": (0, 1)},
+    # Uncommon Bad (weight 12)
+    {"w": 12, "msg": "A thief snatches your coin pouch!",                     "money": (-150, -50)},
+    {"w": 12, "msg": "You twist your ankle on uneven ground.",                 "health": (-10, -5)},
+    {"w": 12, "msg": "You wander too far and exhaust yourself.",               "energy": (-20, -10)},
+    {"w": 12, "msg": "Bandits ambush you and steal your food.",                "food": (-3, -1)},
+    {"w": 12, "msg": "You eat something suspicious and feel ill.",             "health": (-15, -5)},
+    # Rare (weight 5)
+    {"w": 5, "msg": "You discover an abandoned cabin stocked with supplies!", "food": (5, 10), "money": (100, 300), "health": (10, 20)},
+    {"w": 5, "msg": "You find a treasure map!",                               "inv_item": "treasure_map"},
+    {"w": 5, "msg": "You unearth an ancient relic of great value!",           "inv_item": "ancient_relic", "money": (200, 500)},
+    {"w": 5, "msg": "You discover a hidden vault with riches!",               "money": (400, 800)},
+    {"w": 5, "msg": "A merchant gifts you a golden statue for helping him!",  "inv_item": "golden_statue", "money": (300, 600)},
+    {"w": 5, "msg": "You find a rare gemstone glittering in a stream!",       "money": (300, 700)},
+    {"w": 5, "msg": "You rescue a noble's child; he rewards you handsomely.", "money": (500, 1000), "reputation": (1, 2)},
+    {"w": 5, "msg": "You discover ancient ruins with inscribed wisdom.",       "hunting_skill": (1, 1), "trading_skill": (1, 1), "luck": (1, 1)},
+    # Very Rare (weight 2)
+    {"w": 2, "msg": "You find a legendary buried treasure!",                  "money": (1000, 3000)},
+    {"w": 2, "msg": "A wandering sage teaches you advanced trading secrets.",  "trading_skill": (2, 3)},
+    {"w": 2, "msg": "A master hunter shares ancient hunting techniques.",      "hunting_skill": (2, 3)},
+    {"w": 2, "msg": "You discover a dragon's hoard — just a small piece.",    "money": (2000, 5000)},
+    {"w": 2, "msg": "Fortune smiles on you: a miracle windfall!",             "money": (1500, 4000), "luck": (1, 2)},
+    # Luck-boosted event (weight 8, modified by luck)
+    {"w": 8, "msg": "Your sharp eye spots a merchant's dropped purse.",       "money": (60, 200)},
+    {"w": 8, "msg": "You find a well-travelled trade route and collect tolls.","money": (80, 250)},
+    {"w": 8, "msg": "You discover a hidden spring with healing waters.",       "health": (20, 35), "energy": (15, 25)},
+    {"w": 8, "msg": "You stumble into a bandit camp while they sleep and take their loot.", "money": (150, 400)},
+    {"w": 8, "msg": "You find an exotic spice trader who overpays for your help.", "money": (120, 350)},
+]
+
+# ─── Random End-of-Day Events (50+) ───────────────────────────────────────────
+
+DAILY_EVENTS = [
+    # Good events
+    {"w": 15, "msg": "Good Harvest! Crops are plentiful.",                    "food": (2, 5)},
+    {"w": 12, "msg": "A travelling merchant passes through. Busy day!",       "money": (30, 100)},
+    {"w": 10, "msg": "Festival in town! Everyone is merry.",                  "health": (5, 10), "energy": (10, 20)},
+    {"w": 10, "msg": "Lucky day — you find extra coin under your floorboard.", "money": (20, 80)},
+    {"w": 8,  "msg": "A merchant fair opens. Business is booming.",           "money": (50, 200)},
+    {"w": 8,  "msg": "You receive a gift from a grateful neighbour.",         "food": (1, 3), "money": (20, 60)},
+    {"w": 8,  "msg": "Sunny weather lifts your spirits.",                     "energy": (10, 20), "health": (5, 10)},
+    {"w": 6,  "msg": "You win a small lottery!",                              "money": (100, 400)},
+    {"w": 5,  "msg": "A skilled healer visits town. You get treated.",        "health": (15, 30)},
+    {"w": 5,  "msg": "Bumper crop season benefits everyone.",                 "food": (3, 7)},
+    {"w": 4,  "msg": "Your reputation precedes you: a noble pays handsomely.", "money": (200, 500)},
+    {"w": 4,  "msg": "A rare comet passes — locals say it brings luck.",      "luck": (1, 1)},
+    {"w": 4,  "msg": "A distant relative sends you money.",                   "money": (100, 300)},
+    {"w": 3,  "msg": "Treasure hunters pass through, sparking excitement.",   "money": (80, 250)},
+    {"w": 3,  "msg": "You recall an old friend's trading secret.",            "trading_skill": (1, 1)},
+    {"w": 3,  "msg": "A hunting elder passes on ancient knowledge.",          "hunting_skill": (1, 1)},
+    {"w": 2,  "msg": "Grand lottery jackpot! You hold a winning ticket!",    "money": (500, 1500)},
+    {"w": 2,  "msg": "A wandering bard sings your praises across the land.", "reputation": (1, 2)},
+    {"w": 2,  "msg": "An anonymous donor leaves a chest at your door.",       "money": (300, 800)},
+    # Neutral events
+    {"w": 12, "msg": "Tax collector visits. You pay your dues.",              "money": (-80, -20)},
+    {"w": 10, "msg": "A minor dispute drains your time but not your coin.",   "energy": (-10, -5)},
+    {"w": 8,  "msg": "Market prices fluctuate. Nothing major happens.",       "money": (-20, 20)},
+    {"w": 8,  "msg": "Quiet day. Nothing extraordinary.",                     "energy": (-5, 5)},
+    {"w": 6,  "msg": "A traveller stops for directions. No gain, no loss.",   "reputation": (0, 1)},
+    # Bad events
+    {"w": 15, "msg": "Drought reduces food supply.",                          "food": (-3, -1)},
+    {"w": 12, "msg": "Bandits raid the outskirts. You lose some money.",      "money": (-100, -30)},
+    {"w": 10, "msg": "Flood damages local farms.",                            "food": (-2, -1), "health": (-5, 0)},
+    {"w": 8,  "msg": "A disease sweeps through town. You fall ill.",          "health": (-15, -5)},
+    {"w": 8,  "msg": "Thieves break in and steal your supplies.",             "food": (-2, -1), "money": (-60, -20)},
+    {"w": 8,  "msg": "Bad weather keeps you indoors. Energy sapped.",         "energy": (-15, -5)},
+    {"w": 6,  "msg": "A con man tricks you out of coin.",                     "money": (-120, -40)},
+    {"w": 6,  "msg": "You eat spoiled food and feel sick.",                   "health": (-15, -8)},
+    {"w": 5,  "msg": "Harsh winds damage local infrastructure.",              "money": (-50, -10)},
+    {"w": 5,  "msg": "Locust swarm devastates crops.",                        "food": (-4, -2)},
+    {"w": 4,  "msg": "A large tax levy hits everyone in the kingdom.",        "money": (-200, -80)},
+    {"w": 4,  "msg": "You catch a bad cold and feel weakened.",               "health": (-20, -10), "energy": (-15, -5)},
+    {"w": 3,  "msg": "Fire breaks out nearby. You help fight it and are exhausted.", "energy": (-25, -15)},
+    {"w": 3,  "msg": "Bandit king demands tribute from all citizens.",        "money": (-250, -100)},
+    {"w": 2,  "msg": "A devastating storm ravages the land.",                 "food": (-5, -2), "health": (-15, -5), "money": (-100, -30)},
+    {"w": 2,  "msg": "Plague strikes! You barely survive.",                   "health": (-30, -15)},
+    # Business/Property events
+    {"w": 8,  "msg": "Your properties generate extra rental income this week.", "property_bonus": True},
+    {"w": 6,  "msg": "A business deal falls through but you recover quickly.", "money": (-50, -10)},
+    {"w": 4,  "msg": "Your businesses attract new customers!",                "business_bonus": True},
+    {"w": 3,  "msg": "A competitor undercuts your shop prices.",              "money": (-80, -20)},
+    {"w": 2,  "msg": "A fire damages one of your properties.",                "money": (-300, -100)},
+    # Special
+    {"w": 5,  "msg": "Kingdom-wide celebration! Everyone gets food and drink.", "food": (2, 4), "energy": (10, 20), "health": (5, 10)},
+    {"w": 3,  "msg": "Royal decree: honest citizens rewarded!",              "money": (100, 300), "reputation": (1, 2)},
+    {"w": 2,  "msg": "A miracle blessing from a wandering saint.",            "health": (20, 40), "luck": (1, 2)},
+]
+
+# ─── Player ────────────────────────────────────────────────────────────────────
+
+class Player:
+    def __init__(self):
+        self.health         = MAX_HEALTH
+        self.energy         = MAX_ENERGY
+        self.money          = 500
+        self.food           = 5
+        self.luck           = 1
+        self.reputation     = 1
+        self.hunting_skill  = 1
+        self.trading_skill  = 1
+        self.alive          = True
+        self.day            = 1
+        self.income_mult    = 1.0
+        self.inventory      = {}          # item_key: count
+        self.properties     = []          # list of property keys
+        self.businesses     = []          # list of business keys
+        self.achievements   = set()
+        self.stats          = {
+            "work_count": 0,
+            "hunt_count": 0,
+            "explores": 0,
+            "invest_count": 0,
+            "total_earned": 500,
+            "days_below_10hp": 0,
+        }
+
+   
